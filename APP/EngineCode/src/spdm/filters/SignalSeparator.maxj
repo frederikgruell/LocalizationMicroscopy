@@ -1,0 +1,154 @@
+package spdm.filters;
+
+/**
+ * @author gruell
+ *
+ * SignalSeperator
+ *
+ * The signal separator aims to remove signals in a ROI that leak into the signal at the center.
+ * It scans the ROI from the center to the outside in the given direction and sets all pixels to
+ * zero after it detected a local minimum in that direction
+ */
+
+import spdm.kernels.SpdmKernel;
+
+import com.maxeler.maxcompiler.v2.kernelcompiler.stdlib.Reductions;
+import com.maxeler.maxcompiler.v2.kernelcompiler.stdlib.core.Count;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.base.DFEVar;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.composite.DFEVector;
+
+public class SignalSeparator {
+
+	private final SpdmKernel kernel;
+	private final Direction direction;
+
+	public SignalSeparator(SpdmKernel kernel, Direction direction) {
+
+		this.kernel    = kernel;
+		this.direction = direction;
+	}
+
+	public DFEVector<DFEVar> separate(DFEVector<DFEVar> roi)
+	{
+
+		Count.Params pixelCountParams = kernel.control.count.makeParams(kernel.bitWidthOf(kernel.getRoiSize()))
+			.withMax(kernel.getRoiSize());
+		Count.Counter pixelCounter = kernel.control.count.makeCounter(pixelCountParams);
+		DFEVar pixelCount = pixelCounter.getCount();
+
+
+		DFEVector<DFEVar> roiIn = roi;
+
+		DFEVector<DFEVar> reorderedRoi = reorderLinearRoiToAccessPatternRoi(roiIn);
+		DFEVar q = kernel.control.mux(pixelCount, reorderedRoi.getElementsAsList()).cast(kernel.getPixelFracValueType()); //.watch("sepq");
+
+		Count.Params iCountParams = kernel.control.count.makeParams(kernel.bitWidthOf(kernel.getRoiEdgeLength()))
+			.withMax(kernel.getRoiEdgeLength());
+		Count.Counter iCounter = kernel.control.count.makeCounter(iCountParams);
+		DFEVar i = iCounter.getCount();
+
+		DFEVar xIsOnCenter = i.eq(0);
+		DFEVar newColumn = xIsOnCenter;
+		DFEVar changeInDirection = i.eq(kernel.getRoiRadius() + 1);
+
+		DFEVar qCenterOfRow = Reductions.streamHold(q, xIsOnCenter);
+		DFEVar enableChopping = i.neq(1) & i.neq(kernel.getRoiRadius() + 1);
+
+		DFEVar qAfterChopping = chopOffAfterMin(q, newColumn | changeInDirection, qCenterOfRow, enableChopping); //.watch("sepqAfterChopping");
+
+		DFEVector<DFEVar> roiOut = formLinearRoiFromAccesPatternQ(qAfterChopping);
+		DFEVector<DFEVar> roiOutHold  = Reductions.streamHold(roiOut, pixelCount.eq(0));
+
+
+		return roiOutHold;
+	}
+
+
+
+	int calcY(int pixel)
+	{
+		return pixel / kernel.getRoiEdgeLength();
+	}
+
+	int calcX(int pixel)
+	{
+		return pixel % kernel.getRoiEdgeLength();
+	}
+
+	int mapLinear1stCoordToAccesPattern1stCoord(int linear1st)
+	{
+		return linear1st <= 3 ? kernel.getRoiRadius() - linear1st : linear1st;
+	}
+
+	int mapLinear2ndCoordToAccesPattern2ndCoord(int linear2nd)
+	{
+		return linear2nd;
+	}
+
+	int linearPixelCountToAccessPatternPixelPos(int pixel)
+	{
+		int x = calcX(pixel);
+		int y = calcY(pixel);
+
+		int linear1st = direction.horizontalNotVertical() ? x : y;
+		int linear2nd = direction.horizontalNotVertical() ? y : x;
+
+		int accessPattern1stCoord = mapLinear1stCoordToAccesPattern1stCoord(linear1st);
+		int accessPattern2ndCoord = mapLinear2ndCoordToAccesPattern2ndCoord(linear2nd);
+
+		return accessPattern1stCoord + accessPattern2ndCoord * kernel.getRoiEdgeLength();
+	}
+
+	DFEVector<DFEVar> reorderLinearRoiToAccessPatternRoi(DFEVector<DFEVar> linearRoi)
+	{
+		DFEVector<DFEVar> reorderedRoi = kernel.getRoiType().newInstance(kernel);
+
+		for(int pixel = 0; pixel < kernel.getRoiEdgeLength() * kernel.getRoiEdgeLength(); pixel++) {
+			reorderedRoi.get(linearPixelCountToAccessPatternPixelPos(pixel)).connect(linearRoi.get(pixel));
+		}
+
+		return reorderedRoi;
+	}
+
+	DFEVector<DFEVar> formLinearRoiFromAccesPatternQ(DFEVar q)
+	{
+		DFEVector<DFEVar> roi = kernel.getRoiType().newInstance(kernel);
+		for(int linearPixel = 0; linearPixel < kernel.getRoiEdgeLength() * kernel.getRoiEdgeLength(); linearPixel++) {
+			roi.connect(linearPixel, kernel.stream.offset(q, linearPixelCountToAccessPatternPixelPos(linearPixel)));
+		}
+
+		return roi;
+	}
+
+	DFEVar chopOffAfterMin(DFEVar in, DFEVar reset, DFEVar resetValue, DFEVar enable)
+	{
+		DFEVar prev = (reset ? resetValue : kernel.stream.offset(in, -1));
+		DFEVar crossesMinimum = (in > prev);
+		DFEVar hasCrossedMinimumEnabled = Reductions.streamMax(crossesMinimum  & enable, reset);
+
+		DFEVar choppedOffAfterMinimum = (hasCrossedMinimumEnabled ? kernel.constant.var(0) : in);
+		return enable ? choppedOffAfterMinimum : in;
+	}
+
+
+	public enum Direction {
+		VERTICAL(false),
+		HORIZONTAL(true);
+
+		private boolean hnv;
+
+		private Direction(boolean horizontalNotVertical) {
+			hnv = horizontalNotVertical;
+		}
+
+		public boolean horizontalNotVertical() {
+			return hnv;
+		}
+
+		@Override
+		public String toString() {
+			return hnv ? "horizontal" : "vertical";
+		}
+	}
+
+}

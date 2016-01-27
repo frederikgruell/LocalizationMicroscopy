@@ -1,0 +1,168 @@
+package spdm.kernels;
+
+import com.maxeler.maxcompiler.v2.kernelcompiler.KernelParameters;
+import com.maxeler.maxcompiler.v2.kernelcompiler.stdlib.KernelMath;
+import com.maxeler.maxcompiler.v2.kernelcompiler.stdlib.Reductions;
+import com.maxeler.maxcompiler.v2.kernelcompiler.stdlib.core.Count;
+import com.maxeler.maxcompiler.v2.kernelcompiler.stdlib.core.CounterChain;
+import com.maxeler.maxcompiler.v2.kernelcompiler.stdlib.core.Mem.DualPortMemOutputs;
+import com.maxeler.maxcompiler.v2.kernelcompiler.stdlib.core.Mem.RamPortMode;
+import com.maxeler.maxcompiler.v2.kernelcompiler.stdlib.core.Mem.RamPortParams;
+import com.maxeler.maxcompiler.v2.kernelcompiler.stdlib.core.Mem.RamWriteMode;
+import com.maxeler.maxcompiler.v2.kernelcompiler.stdlib.core.Stream.OffsetExpr;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.base.DFEVar;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.composite.DFEStruct;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.composite.DFEVector;
+
+/**
+ * @author Frederik Grüll
+ *
+ * SignalFinder
+ *
+ * Reads one pixel per clock cycle and looks for local maxima that are above the background by a factor of bg_threshold_factor
+ * The ROI of the maxima and the position of the ROI is presented at the ouput, so is the the background level and the frame number
+ * If a new image has begun or if the current pixel is the last one of the entire stack the image index is set to a value defined in
+ * enum ImgCode and an ROI without signal is sent
+ */
+
+public class SignalFinderKernel extends SpdmKernel {
+
+	/**
+	 * @param parameters kernel parameters
+	 * @param imgHeightConst height of the images in pixel
+	 * @param imgWidthConst width of the images in pixel
+	 */
+
+	public SignalFinderKernel(KernelParameters parameters, int maxImgWidth, int maxImgHeight) {
+		super(parameters);
+
+		// Input
+		DFEVar pixelValue = io.input("pixel_value", pixelValueType).cast(pixelFracValueType).simWatch("pixelValue");
+
+		DFEVar totalImages = io.scalarInput("total_images", int16Type).cast(int32Type).simWatch("totalImages");
+		DFEVar bgThresholdFactor = io.scalarInput("bg_threshold_factor", int16Type);
+		DFEVar startImage = io.scalarInput("start_image", int32Type);
+		DFEVar imgWidth = io.scalarInput("img_width", int32Type);
+		DFEVar imgHeight = io.scalarInput("img_height", int32Type);
+
+		CounterChain chain = control.count.makeCounterChain();
+		DFEVar img = chain.addCounter(maxImageCount, 1).cast(int32Type).simWatch("img");
+		DFEVar y = chain.addCounter(imgHeight.cast(uint32Type), 1).cast(int32Type).simWatch("y");
+		DFEVar x = chain.addCounter(imgWidth.cast(uint32Type), 1).cast(int32Type).simWatch("x");
+
+
+		DFEVar roiCrossesImageBorder = (x < roiRadius | y < roiRadius) | (x > (imgWidth - roiRadius) | y > (imgHeight - roiRadius));
+		DFEVar isPastStartImage = img >= startImage;
+
+		int maxImgPixels = maxImgHeight * maxImgWidth;
+		int memAddressWidth = bitWidthOf(maxImgPixels);
+		//int maxPixelCount= imgWidthConst * imgHeightConst;
+		DFEVar maxPixelCount= (imgWidth * imgHeight).cast(dfeUInt(memAddressWidth));
+		imgWidth.simWatch("imgWidth");
+		imgHeight.simWatch("imgHeight");
+		Count.Params pixelCountParams = control.count.makeParams(memAddressWidth)
+														.withMax(maxPixelCount);
+		Count.Counter pixelCounter = control.count.makeCounter(pixelCountParams);
+
+		DFEVar pixelCount = pixelCounter.getCount().simWatch("pixelCount");
+
+
+		BackgroundRemovalResult backgroundRemovalResult = subtractBackground(pixelValue, pixelCount, img, maxImgPixels);
+		DFEVar pixelNoBg = backgroundRemovalResult.pixelNoBg;
+		DFEVar sigmaBg   = backgroundRemovalResult.sigmaBg;
+		DFEVar background = backgroundRemovalResult.background;
+
+		// finder
+
+		DFEVector<DFEVar> roi = roiType.newInstance(this);
+		DFEVar center = pixelNoBg.simWatch("center");
+		DFEVar centerBg = background;
+
+		OffsetExpr imgWidthOffset = stream.makeOffsetParam("img_width_offset", 50, maxImgWidth);
+		for(int i = 0; i < roiEdgeLength; i++) {		// y
+			for(int j = 0; j < roiEdgeLength; j++) {	// x
+				roi.connect(i * roiEdgeLength + j, stream.offset(pixelNoBg, j - roiRadius + (i - roiRadius) * imgWidthOffset));
+			}
+		}
+		roi.simWatch("roi");
+
+		DFEVar localMax = constant.var(true);
+		for(int i = roiRadius - 1; i <= roiRadius + 1; i++) {
+			DFEVar intermResult = constant.var(true);
+
+			for(int j = roiRadius - 1; j <= roiRadius + 1; j++) {
+				int roiIndex = i * roiEdgeLength + j;
+				if(i != roiRadius || j != roiRadius) {
+					intermResult = intermResult & (roi[roiIndex] <= center);
+				}
+			}
+
+			localMax = localMax & intermResult;
+		}
+		localMax.simWatch("localMax");
+
+		DFEVar threshold = (bgThresholdFactor.cast(pixelFracValueType) * sigmaBg).simWatch("threshold");
+		DFEVar twoSigmaAboveBg = center > threshold;
+		twoSigmaAboveBg.simWatch("twoSigmaAboveBg");
+
+
+		DFEVar roiFound = (localMax & twoSigmaAboveBg) & (~roiCrossesImageBorder & isPastStartImage);
+		roiFound.simWatch("roiFound");
+
+		DFEVar endOfImage = x.eq(imgWidth - roiRadius - 1) & y.eq(imgHeight - roiRadius - 1);
+
+		DFEVar lastPixels = Reductions.streamMax(img.eq(totalImages - 1) & endOfImage);
+
+		DFEVar imgWithEndIndicator = lastPixels ? constant.var(ImgCode.LASTPIXEL.getValue())
+								  : endOfImage ? constant.var(ImgCode.ENDOFIMAGE.getValue())
+								  : img;
+
+		DFEStruct roiProp = roiPropType.newInstance(this);
+		((DFEVar) roiProp.get("x")).connect(x);
+		((DFEVar) roiProp.get("y")).connect(y);
+		((DFEVar) roiProp.get("img")).connect(imgWithEndIndicator);
+		((DFEVar) roiProp.get("bg")).connect(centerBg);
+
+		DFEVar sendOutput = roiFound | endOfImage | lastPixels;
+
+		io.output("roi", roi, roiType, sendOutput);
+		io.output("roi_prop", roiProp, roiPropType, sendOutput);
+	}
+
+
+	class BackgroundRemovalResult {
+		public DFEVar pixelNoBg;
+		public DFEVar sigmaBg;
+		public DFEVar background;
+	}
+
+	protected BackgroundRemovalResult subtractBackground(DFEVar pixelValue, DFEVar pixelCount, DFEVar img, int maxPixelCount) {
+
+		int bramStreamOffset = 50;                                              // offset between reading and writing BRAM port so design can be scheduled
+		DFEVar inputAddress = pixelCount;
+		DFEVar outputAddress = stream.offset(pixelCount, bramStreamOffset);
+		DFEVar newBackgroundNext = pixelFracValueType.newInstance(this).simWatch("newBackgroundNext" + bramStreamOffset);
+		RamPortParams<DFEVar> inputPort = mem.makeRamPortParams(RamPortMode.WRITE_ONLY, optimization.pipeline(inputAddress), pixelFracValueType)
+			.withDataIn(optimization.pipeline(newBackgroundNext));
+		RamPortParams<DFEVar> outputPort = mem.makeRamPortParams(RamPortMode.READ_ONLY, optimization.pipeline(outputAddress), pixelFracValueType);
+		DualPortMemOutputs<DFEVar> backgroundRam = mem.ramDualPort(maxPixelCount, RamWriteMode.READ_FIRST, inputPort, outputPort);
+
+		DFEVar initialBackground = pixelValue;
+		DFEVar background = img.eq(0) ? initialBackground : optimization.pipeline(backgroundRam.getOutputB());
+		background.simWatch("background");
+		DFEVar sigmaBg = KernelMath.sqrt(background.cast(singleType)).cast(pixelFracValueType).simWatch("sigmaBg");
+
+		DFEVar deltaMovingAverageBackgound = min(pixelValue - background, sigmaBg);
+		DFEVar newMovingAverageBackground = (img.eq(0) ? pixelValue : background + deltaMovingAverageBackgound / constant.var(8).cast(pixelFracValueType)).simWatch("newMovingAverageBackground");
+
+		newBackgroundNext.connect(stream.offset(newMovingAverageBackground, -bramStreamOffset));
+		DFEVar pixelNoBg = cutOffNegatives(pixelValue - background);
+
+		BackgroundRemovalResult result = new BackgroundRemovalResult();
+		result.pixelNoBg = pixelNoBg;
+		result.sigmaBg = sigmaBg;
+		result.background = optimization.pipeline(background);
+
+		return result;
+	}
+}

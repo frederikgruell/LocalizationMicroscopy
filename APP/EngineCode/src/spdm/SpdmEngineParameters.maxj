@@ -1,0 +1,11 @@
+package spdm;
+
+import com.maxeler.maxcompiler.v2.build.EngineParameters;
+
+public class SpdmEngineParameters extends EngineParameters {
+
+	public SpdmEngineParameters(String[] args) {
+		super(args);
+	}
+
+}

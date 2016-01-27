@@ -1,0 +1,229 @@
+package spdm.kernels;
+
+
+import spdm.filters.SignalSeparator;
+
+import com.maxeler.maxcompiler.v2.kernelcompiler.KernelParameters;
+import com.maxeler.maxcompiler.v2.kernelcompiler.stdlib.Accumulator;
+import com.maxeler.maxcompiler.v2.kernelcompiler.stdlib.KernelMath;
+import com.maxeler.maxcompiler.v2.kernelcompiler.stdlib.Reductions;
+import com.maxeler.maxcompiler.v2.kernelcompiler.stdlib.core.Count;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.base.DFEVar;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.composite.DFEStruct;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.composite.DFEVector;
+
+/**
+ * @author gruell
+ *
+ * SignalEstimator
+ *
+ * The signal estimator accepts a ROI and calculates the position of the contained signal with sub-pixel
+ * accuracy. It also produces the width of the signal, its total intensity and the location error
+ */
+
+
+public class SignalEstimatorKernel extends SpdmKernel {
+
+	public SignalEstimatorKernel(KernelParameters parameters) {
+		super(parameters);
+
+		Count.Params pixelCountParams = control.count.makeParams(bitWidthOf(roiSize))
+			.withMax(roiSize);
+		Count.Counter pixelCounter = control.count.makeCounter(pixelCountParams);
+		DFEVar pixelCount = pixelCounter.getCount().simWatch("pixelCount");					// pixel in ROI
+
+		DFEVar loadRoi = pixelCount.eq(0).simWatch("loadRoi");
+		DFEVar roiDone = pixelCounter.getWrap().simWatch("roiDone");
+
+		// Input
+		DFEVector<DFEVar> roi = io.input("roi", roiType, loadRoi);
+		roi.simWatch("roi");
+		DFEStruct roiProp = io.input("roi_prop", roiPropType, loadRoi);
+
+		DFEVar separatorThresholdFactor = io.scalarInput("separator_threshold_factor", singleType);
+		DFEVar nmPerPixel = io.scalarInput("nm_per_px", singleType);
+
+		SignalSeparator horizontalSeperator = new SignalSeparator(this, SignalSeparator.Direction.HORIZONTAL);
+		SignalSeparator verticalSeperator   = new SignalSeparator(this, SignalSeparator.Direction.VERTICAL);
+
+		DFEVector<DFEVar> horizSeparatedRoi  = horizontalSeperator.separate(roi);
+		DFEVector<DFEVar> verticSeparatedRoi = verticalSeperator.separate(horizSeparatedRoi);
+		DFEVector<DFEVar> separatedRoi       = horizontalSeperator.separate(verticSeparatedRoi).simWatch("separatedRoi");
+
+		DFEVar q    = control.mux(pixelCount, separatedRoi.getElementsAsList()).cast(accuType).simWatch("q");
+		DFEVar qOld = control.mux(pixelCount, roi.getElementsAsList()).cast(accuType).simWatch("qOld");
+
+		DFEVar xRoiPos = roiProp.get("x");
+		DFEVar yRoiPos = roiProp.get("y");
+		DFEVar img = roiProp.get("img");
+		DFEVar bg = roiProp.get("bg");
+//		DFEVar sigmaBg = roiProp.get("sigmaBg");
+
+		Count.Params xCountParams = control.count.makeParams(bitWidthOf(roiEdgeLength))
+			.withMax(roiEdgeLength);
+		Count.Counter xCounter = control.count.makeCounter(xCountParams);
+		DFEVar x = xCounter.getCount().cast(accuType).simWatch("x");
+
+		Count.Params yCountParams = control.count.makeParams(bitWidthOf(roiEdgeLength))
+			.withMax(roiEdgeLength)
+			.withEnable(xCounter.getWrap());
+
+		Count.Counter yCounter = control.count.makeCounter(yCountParams);
+		DFEVar y = yCounter.getCount().cast(accuType).simWatch("y");
+
+		DFEVar x2 = x * x;
+		DFEVar y2 = y * y;
+
+//		Count.Params roiCountParams = control.count.makeParams(int32Type.getIntegerBits())
+//			.withEnable(yCounter.getWrap());
+//		Count.Counter roiPackageCounter = control.count.makeCounter(roiCountParams);
+//		DFEVar roiPackageCount = roiPackageCounter.getCount().cast(int32Type).simWatch("roiPackageCount");
+
+		DFEVar qx = q * x;
+		DFEVar qy = q * y;
+
+		qx.simWatch("qx");
+		qy.simWatch("qy");
+
+		DFEVar qxOld = qOld * x;
+		DFEVar qyOld = qOld * y;
+
+		Accumulator.Params intAccuConfig = Reductions.accumulator.makeAccumulatorConfig(accuType)
+												.withClear(roiDone);
+
+		DFEVar qAcc   = Reductions.accumulator.makeAccumulator(q, intAccuConfig).simWatch("q_acc");
+		DFEVar qxAcc  = Reductions.accumulator.makeAccumulator(qx, intAccuConfig).simWatch("qx_acc");
+		DFEVar qyAcc  = Reductions.accumulator.makeAccumulator(qy, intAccuConfig).simWatch("qy_acc");
+		DFEVar qx2Acc = Reductions.accumulator.makeAccumulator(qx * x, intAccuConfig).simWatch("qx2_acc");
+		DFEVar qy2Acc = Reductions.accumulator.makeAccumulator(qy * y, intAccuConfig);
+
+//		DFEVar qIsPositive = q > 0;
+//		DFEVar xAcc  = Reductions.accumulator.makeAccumulator(qIsPositive ? x   : 0, intAccuConfig).simWatch("x_acc");
+//		DFEVar yAcc  = Reductions.accumulator.makeAccumulator(qIsPositive ? y   : 0, intAccuConfig).simWatch("y_acc");
+//		DFEVar x2Acc = Reductions.accumulator.makeAccumulator(qIsPositive ? x2  : 0, intAccuConfig).simWatch("x2_acc");
+//		DFEVar y2Acc = Reductions.accumulator.makeAccumulator(qIsPositive ? y2  : 0, intAccuConfig).simWatch("y2_acc");
+//		DFEVar nAcc  = Reductions.accumulator.makeAccumulator(qIsPositive ? constant.var(1).cast(int32Type) : 0, intAccuConfig).simWatch("n_acc");
+
+		DFEVar qOldAcc= Reductions.accumulator.makeAccumulator(qOld, intAccuConfig).simWatch("q_old_acc");
+		DFEVar qxOldAcc  = Reductions.accumulator.makeAccumulator(qxOld, intAccuConfig).simWatch("qx_old_acc");
+		DFEVar qyOldAcc  = Reductions.accumulator.makeAccumulator(qyOld, intAccuConfig).simWatch("qy_old_acc");
+		DFEVar qx2OldAcc = Reductions.accumulator.makeAccumulator(qxOld * x, intAccuConfig).simWatch("qx2_old_acc");
+		DFEVar qy2OldAcc = Reductions.accumulator.makeAccumulator(qyOld * y, intAccuConfig);
+
+		DFEVar qOldIsNonZero = qOld.neq(0);
+		DFEVar xOldAcc  = Reductions.accumulator.makeAccumulator(qOldIsNonZero ? x   : 0, intAccuConfig).simWatch("x_old_acc");
+		DFEVar yOldAcc  = Reductions.accumulator.makeAccumulator(qOldIsNonZero ? y   : 0, intAccuConfig).simWatch("y_old_acc");
+		DFEVar x2OldAcc = Reductions.accumulator.makeAccumulator(qOldIsNonZero ? x2 : 0, intAccuConfig).simWatch("x2_old_acc");
+		DFEVar y2OldAcc = Reductions.accumulator.makeAccumulator(qOldIsNonZero ? y2 : 0, intAccuConfig).simWatch("y2_old_acc");
+		DFEVar nOldAcc  = Reductions.accumulator.makeAccumulator(qOldIsNonZero ? constant.var(1).cast(accuType) : 0, intAccuConfig).simWatch("n_old_acc");
+
+//		System.out.println("qx_acc: " + qxAcc.getType() + ", q_acc: " + qAcc.getType());
+
+		DFEVar QSingle = qAcc.cast(singleType);
+		DFEVar qxSingle = qxAcc.cast(singleType);
+		DFEVar qySingle = qyAcc.cast(singleType);
+		DFEVar qx2Single = qx2Acc.cast(singleType);
+		DFEVar qy2Single = qy2Acc.cast(singleType);
+
+//		DFEVar xSingle  = xAcc.cast(singleType);
+//		DFEVar ySingle  = yAcc.cast(singleType);
+//		DFEVar x2Single = x2Acc.cast(singleType);
+//		DFEVar y2Single = y2Acc.cast(singleType);
+//		DFEVar nSingle = nAcc.cast(singleType);
+
+		DFEVar QOldSingle = qOldAcc.cast(singleType);
+		DFEVar qxOldSingle = qxOldAcc.cast(singleType);
+		DFEVar qyOldSingle = qyOldAcc.cast(singleType);
+		DFEVar qx2OldSingle = qx2OldAcc.cast(singleType);
+		DFEVar qy2OldSingle = qy2OldAcc.cast(singleType);
+
+		DFEVar xOldSingle  = xOldAcc.cast(singleType);
+		DFEVar yOldSingle  = yOldAcc.cast(singleType);
+		DFEVar x2OldSingle = x2OldAcc.cast(singleType);
+		DFEVar y2OldSingle = y2OldAcc.cast(singleType);
+		DFEVar nOldSingle  = nOldAcc.cast(singleType);
+
+		//
+		DFEVar isAboveSeperatorThreshold = (QSingle.simWatch("QSingle") / QOldSingle.simWatch("QOldSingle")) > separatorThresholdFactor.simWatch("separatorThresholdFactor");
+		//
+		isAboveSeperatorThreshold.simWatch("isAboveSeparatorThreshold");
+		DFEVar isFakeLocation = img < 0;
+
+		DFEVar const_1_12Single = constant.var((float) 1.0/12.0).cast(singleType);
+		DFEVar mu_x = qxSingle / QSingle;
+		DFEVar mu_y = qySingle / QSingle;
+		DFEVar sigma_x2 = max(qx2Single / QSingle - mu_x * mu_x, const_1_12Single);
+		DFEVar sigma_y2 = max(qy2Single / QSingle - mu_y * mu_y, const_1_12Single);;
+
+		DFEVar mu_xOld = qxOldSingle / QOldSingle;
+		DFEVar mu_yOld = qyOldSingle / QOldSingle;
+		DFEVar sigma_x2Old = max(qx2OldSingle / QOldSingle - mu_xOld * mu_xOld, const_1_12Single);
+		DFEVar sigma_y2Old = max(qy2OldSingle / QOldSingle - mu_yOld * mu_yOld, const_1_12Single);
+
+		DFEVar delta_pixelation2Old = constant.var((float) 1.0/12.0).cast(singleType) / QOldSingle;
+		DFEVar bgSingle = bg.cast(singleType);
+		DFEVar Q2OldSingle = QOldSingle * QOldSingle;
+		DFEVar const_2Single = constant.var(2.0).cast(singleType);
+		DFEVar delta_x2 = delta_pixelation2Old + sigma_x2Old / QOldSingle + (x2OldSingle - mu_xOld * (const_2Single * xOldSingle - nOldSingle * mu_xOld)) * bgSingle / Q2OldSingle;
+		DFEVar delta_y2 = delta_pixelation2Old + sigma_y2Old / QOldSingle + (y2OldSingle - mu_yOld * (const_2Single * yOldSingle - nOldSingle * mu_yOld)) * bgSingle / Q2OldSingle;
+
+		mu_x.simWatch("mu_x");
+		mu_y.simWatch("mu_y");
+		sigma_x2.simWatch("sigma_x2");
+		sigma_y2.simWatch("sigma_y2");
+
+		// KStructType(img, Q, mu_x, mu_y, sigma_x2, sigma_y2, delta_mu_x2, delta_mu_y2);
+		DFEStruct estim = estimatorResultType.newInstance(this);
+		((DFEVar) estim.get("img")).connect(img);
+		//((DFEVar) estim.get("Q")).connect(QSingle.cast(int32Type));
+		((DFEVar) estim.get("Q")).connect(QSingle);
+		((DFEVar) estim.get("mu_x_nm")).connect((mu_x + xRoiPos.cast(singleType) - constant.var(roiRadius)) * nmPerPixel);
+		((DFEVar) estim.get("mu_y_nm")).connect((mu_y + yRoiPos.cast(singleType) - constant.var(roiRadius)) * nmPerPixel);
+		((DFEVar) estim.get("sigma_x_nm")).connect(KernelMath.sqrt(sigma_x2) * nmPerPixel);
+		((DFEVar) estim.get("sigma_y_nm")).connect(KernelMath.sqrt(sigma_y2) * nmPerPixel);
+		((DFEVar) estim.get("delta_mu_x_nm")).connect(KernelMath.sqrt(delta_x2) * nmPerPixel);
+		((DFEVar) estim.get("delta_mu_y_nm")).connect(KernelMath.sqrt(delta_y2) * nmPerPixel);
+
+		// DEBUG
+//		((DFEVar) estim.get("Q_old")).connect(QOldSingle);
+//		((DFEVar) estim.get("bg")).connect(bg.cast(singleType));
+
+
+		// Output
+//		DFEVar isEndOfImage = img.eq(ImgCode.ENDOFIMAGE.getValue()) & roiDone;
+//		DFEVar isLastPackage = img.eq(ImgCode.LASTPIXEL.getValue()) & roiDone;
+//		DFEVar roiPackageCountIsMultOf16 = lastBitsAreZero(roiPackageCount, 4).simWatch("roiPackageCountIsMultOf32") & roiDone;
+
+//		DFEVar roiResultCount = roiPackageCount + 1;
+//		DFEVar sendRoiResultCount = isEndOfImage | isLastPackage | roiPackageCountIsMultOf16;
+
+		// flush.onTrigger(img.eq(ImgCode.LASTPIXEL.getValue()));
+		// flush.whenInputFinished("roi");
+
+//		KArray<DFEVar> roiResultCountArray = roiResultCountType.newInstance(this);
+//		roiResultCountArray.connect(0, roiResultCount);
+//		for(int i = 1; i < roiResultCountTypeLength; i++) {
+//			roiResultCountArray.connect(i, int32Type.newInstance(this, 0));
+//		}
+
+		DFEVar sendResult = roiDone & (isAboveSeperatorThreshold | isFakeLocation);
+
+		io.output("estimation", estim, estimatorResultType, sendResult);
+//		io.output("package_done", roiResultCountArray, roiResultCountType, sendRoiResultCount);
+	}
+
+
+	DFEVar risingEdgeDetect(DFEVar in) {
+		return stream.offset(in, -1).eq(false) & in.eq(true);
+//		return (stream.offset(~in, -1) & in) ? dfeBool().newInstance(this, 1) : dfeBool().newInstance(this, 0);
+	}
+
+	DFEVar changeDetect(DFEVar in) {
+		return stream.offset(in, -1).neq(in);
+//		return stream.offset(in, -1).neq(in) ? dfeBool().newInstance(this, 1) : dfeBool().newInstance(this, 0);
+	}
+
+	DFEVar lastBitsAreZero(DFEVar in, int bits) {
+		return in.slice(0, bits).cast(dfeUInt(bits)).eq(0);
+	}
+}

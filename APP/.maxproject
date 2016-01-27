@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<maxCompilerManager version="2">
+<enginePart internalEngineSubproject="Stochastic Localization Microscopy_EngineCode" isSrcBin="false" isUseDefaultSelected="false" outputLocation="/Stochastic Localization Microscopy_EngineCode/bin" projectName="Stochastic Localization Microscopy"/>
+<cpuPart internalCpuSubproject="Stochastic Localization Microscopy_CPUCode"/>
+<watchedFiles/>
+</maxCompilerManager>

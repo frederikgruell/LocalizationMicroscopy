@@ -1,0 +1,125 @@
+package spdm.kernels;
+
+import com.maxeler.maxcompiler.v2.kernelcompiler.Kernel;
+import com.maxeler.maxcompiler.v2.kernelcompiler.KernelParameters;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.base.DFEFix;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.base.DFEFix.SignMode;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.base.DFEFloat;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.base.DFEVar;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.composite.DFEStructType;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.composite.DFEStructType.StructFieldType;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.composite.DFEVectorType;
+
+/**
+ * @author gruell
+ *
+ * Base class for both kernels, hold common constants and types.
+ *
+ */
+public class SpdmKernel extends Kernel {
+
+	protected DFEFix pixelValueType = dfeInt(16);
+	protected DFEFix pixelFracValueType = dfeFixOffset(16, -4, SignMode.TWOSCOMPLEMENT);
+	protected DFEFloat singleType = dfeFloat(8, 24);
+	protected DFEFix int16Type = dfeInt(16);
+	protected DFEFix int32Type = dfeInt(32);
+	protected DFEFix uint32Type = dfeUInt(32);
+	protected DFEFix accuType = dfeFixOffset(20, -4, SignMode.TWOSCOMPLEMENT);
+	protected DFEStructType roiPropType = buildRoiPropType();
+	protected DFEStructType estimatorResultType = buildEstimatorResultType();
+
+	protected int roiRadius = 3;
+	protected int roiEdgeLength = roiRadius * 2 + 1;
+	protected int roiSize = roiEdgeLength * roiEdgeLength;
+	protected DFEVectorType<DFEVar> roiType = new DFEVectorType<DFEVar>(pixelFracValueType, roiSize);
+
+	protected int roiResultCountTypeLength = 8;
+
+	protected int maxImageCount = (int )Math.pow(2, 20);
+
+	public SpdmKernel(KernelParameters parameters) {
+		super(parameters);
+	}
+
+	DFEStructType buildRoiPropType() {
+		StructFieldType x = new StructFieldType("x", int32Type);
+		StructFieldType y = new StructFieldType("y", int32Type);
+		StructFieldType img = new StructFieldType("img", int32Type);
+		StructFieldType bg = new StructFieldType("bg", pixelFracValueType);
+		//StructFieldType sigmaBg = new StructFieldType("sigmaBg", pixelValueType);
+		return new DFEStructType(x, y, img, bg);
+	}
+
+	DFEStructType buildEstimatorResultType() {
+		StructFieldType img  = new StructFieldType("img", int32Type);
+		StructFieldType Q    = new StructFieldType("Q", singleType);
+		StructFieldType mu_x = new StructFieldType("mu_x_nm", singleType);
+		StructFieldType mu_y = new StructFieldType("mu_y_nm", singleType);
+		StructFieldType sigma_x = new StructFieldType("sigma_x_nm", singleType);
+		StructFieldType sigma_y = new StructFieldType("sigma_y_nm", singleType);
+		StructFieldType delta_mu_x = new StructFieldType("delta_mu_x_nm", singleType);
+		StructFieldType delta_mu_y = new StructFieldType("delta_mu_y_nm", singleType);
+
+		return new DFEStructType(img, Q, mu_x, mu_y, sigma_x, sigma_y, delta_mu_x, delta_mu_y);
+	}
+
+	// get minimum bit width to store an unsigned integer less or equal than i
+	public int bitWidthOf(int i)
+	{
+		return (int) Math.ceil(Math.log10(i) / Math.log10(2));
+	}
+
+	/// set all negative values to zero
+	protected DFEVar cutOffNegatives(DFEVar in)
+	{
+		return in < 0 ? constant.var(0) : in;
+	}
+
+	protected DFEVar min(DFEVar a, DFEVar b)
+	{
+		return (a < b) ? a : b;
+	}
+
+	protected DFEVar max(DFEVar a, DFEVar b)
+	{
+		return (a > b) ? a : b;
+	}
+
+	// getters for simulation
+	public DFEFix getPixelValueType() { return pixelValueType; }
+	public DFEFix getPixelFracValueType() { return pixelFracValueType; }
+	public DFEFloat getSingleType() { return singleType; }
+	public DFEFix getInt32Type() { return int32Type; }
+	public DFEFix getInt16Type() { return int16Type; }
+	public DFEStructType getRoiPropType() { return roiPropType; }
+	public DFEStructType getEstimatorResultType() { return estimatorResultType; }
+
+	public int getRoiRadius() { return roiRadius; }
+	public int getRoiEdgeLength() { return roiEdgeLength; }
+	public int getRoiSize() { return roiSize; }
+	public DFEVectorType<DFEVar> getRoiType() { return roiType; }
+
+	public int getMaxImageCount() {return maxImageCount; }
+
+	/**
+	 * @author gruell
+	 *
+	 * Enum that holds special values to indicate new images or the end of the image stack
+	 */
+	public static enum ImgCode {
+		ENDOFIMAGE(-1),
+		LASTPIXEL(-2);
+
+		private final int value;
+
+		private ImgCode(int value) {
+			this.value = value;
+		}
+
+		public int getValue() {
+			return value;
+		}
+	}
+
+}
+

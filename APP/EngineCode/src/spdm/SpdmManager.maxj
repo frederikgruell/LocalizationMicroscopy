@@ -1,0 +1,104 @@
+package spdm;
+
+import spdm.kernels.SignalEstimatorKernel;
+import spdm.kernels.SignalFinderKernel;
+
+import com.maxeler.maxcompiler.v2.kernelcompiler.KernelParameters;
+import com.maxeler.maxcompiler.v2.managers.BuildConfig;
+import com.maxeler.maxcompiler.v2.managers.custom.CustomManager;
+import com.maxeler.maxcompiler.v2.managers.custom.DFELink;
+import com.maxeler.maxcompiler.v2.managers.custom.blocks.KernelBlock;
+import com.maxeler.maxcompiler.v2.managers.custom.stdlib.DebugLevel;
+
+public class SpdmManager extends CustomManager {
+
+	private static final String signalFinderName = "SignalFinder";
+	private static final String signalEstimatorName = "SignalEstimator";
+
+	public SpdmManager(SpdmEngineParameters engineParameters) {
+		super(engineParameters);
+
+		int maxImgHeight = 512;
+		int maxImgWidth = 512;
+
+		KernelParameters signalFinderParams = makeKernelParameters(signalFinderName);
+		SignalFinderKernel signalFinderKernel = new SignalFinderKernel(signalFinderParams, maxImgWidth, maxImgHeight);
+
+		KernelParameters signalEstimatorParams = makeKernelParameters(signalEstimatorName);
+		SignalEstimatorKernel signalEstimatorKernel = new SignalEstimatorKernel(signalEstimatorParams);
+
+		KernelBlock signalFinderBlock = addKernel(signalFinderKernel);
+		KernelBlock signalEstimatorBlock = addKernel(signalEstimatorKernel);
+
+		DFELink fromHost = addStreamFromCPU("from_host", StreamMode.LOW_LATENCY_ENABLED);
+		DFELink toHost = addStreamToCPU("to_host", StreamMode.LOW_LATENCY_ENABLED);
+
+		signalFinderBlock.getInput("pixel_value").connect(fromHost);
+
+		DFELink roi = signalEstimatorBlock.getInput("roi");
+		roi.connect(signalFinderBlock.getOutput("roi"));
+
+		DFELink roiProp = signalEstimatorBlock.getInput("roi_prop");
+		roiProp.connect(signalFinderBlock.getOutput("roi_prop"));
+
+		toHost.connect(signalEstimatorBlock.getOutput("estimation"));
+
+		addMaxFileConstant("max_img_width", maxImgWidth);
+		addMaxFileConstant("max_img_height", maxImgHeight);
+		addMaxFileConstant("estimator_result_bitsize", signalEstimatorKernel.getEstimatorResultType().getTotalBits());
+
+		DebugLevel debugLevel = new DebugLevel();
+		debugLevel.setHasStreamStatus(false);
+		debug.setDebugLevel(debugLevel);
+
+		debug.streamStatus(fromHost, true);
+		debug.streamStatus(toHost, true);
+		debug.streamStatus(roi, true);
+		debug.streamStatus(roiProp, true);
+
+		config.setDefaultStreamClockFrequency(200);
+
+		//createSLiCinterface(modeDefault());
+
+		configBuild(engineParameters);
+	}
+
+	/*
+	private static EngineInterface modeDefault() {
+		EngineInterface engineInterface = new EngineInterface();
+
+		InterfaceParam pixelCount = engineInterface.addParam("pixel_count", CPUTypes.INT64);
+		engineInterface.setTicks(signalFinderName, pixelCount);
+		engineInterface.setTicks(signalEstimatorName, 2 * pixelCount);
+
+		InterfaceParam  totalImages    = engineInterface.addParam("total_images", CPUTypes.INT);
+		InterfaceParam  bgThresholdFactor    = engineInterface.addParam("bg_threshold_factor", CPUTypes.INT);
+		InterfaceParam  startImage    = engineInterface.addParam("start_image", CPUTypes.INT);
+
+		engineInterface.setScalar(signalFinderName, "total_images", totalImages);
+		engineInterface.setScalar(signalFinderName, "bg_threshold_factor", bgThresholdFactor);
+		engineInterface.setScalar(signalFinderName, "start_image", startImage);
+
+		InterfaceParam separatorThresholdFactor = engineInterface.addParam("separator_threshold_factor", CPUTypes.FLOAT);
+		InterfaceParam nmPerPixel = engineInterface.addParam("nm_per_px", CPUTypes.FLOAT);
+
+		engineInterface.setScalar(signalEstimatorName, "separator_threshold_factor", separatorThresholdFactor);
+		engineInterface.setScalar(signalEstimatorName, "nm_per_px", nmPerPixel);
+
+		return engineInterface;
+	}
+	*/
+
+	private void configBuild(SpdmEngineParameters params) {
+		BuildConfig buildConfig = getBuildConfig();
+		buildConfig.setMPPRCostTableSearchRange(params.getMPPRStartCT(), params.getMPPREndCT());
+		buildConfig.setMPPRParallelism(params.getMPPRThreads());
+		buildConfig.setMPPRRetryNearMissesThreshold(params.getMPPRRetryThreshold());
+	}
+
+	public static void main(String[] args) {
+		SpdmManager manager = new SpdmManager(new SpdmEngineParameters(args));
+		manager.build();
+	}
+
+}
